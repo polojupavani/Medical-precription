@@ -1,0 +1,66 @@
+@api_router.post("/documents/read-prescription")
+async def read_prescription(request_data: dict):
+    """Extract and translate prescription text for voice reading"""
+    document_id = request_data.get(\'document_id\')
+    language = request_data.get(\'language\', \'english\')
+    
+    if not document_id:
+        raise HTTPException(status_code=400, detail="Document ID is required")
+    
+    # Get document from database
+    document = await db.documents.find_one({"id": document_id})
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    try:
+        # Get EMERGENT_LLM_KEY
+        api_key = os.environ.get(\'EMERGENT_LLM_KEY\')
+        if not api_key:
+            raise HTTPException(status_code=500, detail="AI service not configured")
+        
+        # Initialize LLM chat for prescription extraction
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"prescription-extract-{document_id}",
+            system_message=f"You are a medical AI assistant specialized in extracting prescription information from medical documents. Extract and format prescription details clearly for voice reading in {language}."
+        ).with_model("openai", "gpt-4o")
+        
+        prescription_prompt = f"""
+        Based on the following medical document analysis, extract ONLY the prescription information (medications, dosages, instructions) and format it clearly for voice reading in {language}:
+
+        Document Analysis: {document.get(\'ai_summary\', \'\')}
+
+        Instructions:
+        1. Focus ONLY on prescription details (medicines, dosages, timing, instructions)
+        2. Format for voice reading - use clear, simple sentences
+        3. If language is \'hindi\' or \'telugu\', translate the medical terms appropriately but keep drug names in English for safety
+        4. Include dosage, frequency, and duration if available
+        5. If no prescription is found, return "No prescription information found in this document"
+
+        Language: {language}
+        """
+        
+        # Handle different languages
+        if language == \'hindi\':
+            prescription_prompt += "\
+Please provide the response in Hindi (Devanagari script), but keep medicine names in English for safety."
+        elif language == \'telugu\':
+            prescription_prompt += "\
+Please provide the response in Telugu script, but keep medicine names in English for safety."
+        else:
+            prescription_prompt += "\
+Please provide the response in clear, simple English."
+        
+        user_message = UserMessage(text=prescription_prompt)
+        
+        # Get AI response
+        response = await chat.send_message(user_message)
+        
+        return {"prescription_text": response}
+        
+    except Exception as e:
+        print(f"Error extracting prescription for document {document_id}: {str(e)}")
+        # Fallback to basic AI summary
+        return {"prescription_text": document.get(\'ai_summary\', \'Unable to extract prescription information\')}
+
+@api_router.delete("/documents/{document_id}")
